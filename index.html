@@ -20,6 +20,10 @@ button{font-family:inherit;border:none;background:none;color:inherit;cursor:poin
 input,select,textarea{font-family:inherit;font-size:16px;color:var(--ink);
   -webkit-appearance:none;appearance:none;border:1px solid var(--line);
   border-radius:8px;padding:10px 12px;background:#fff;width:100%}
+input[type=checkbox]{-webkit-appearance:checkbox;appearance:auto;width:18px;height:18px;vertical-align:-3px;margin-right:6px}
+.subtotal{text-align:center;font-size:12px;color:var(--sub);padding-bottom:4px}
+.own-quick{display:flex;gap:6px;margin-bottom:6px}
+.own-quick button{flex:1;font-size:12px;padding:8px 0;border:1px solid var(--line);border-radius:8px;background:#fff}
 select{background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8'><path d='M1 1l5 5 5-5' stroke='%236B7280' stroke-width='2' fill='none'/></svg>");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
 
 header{position:sticky;top:0;z-index:20;background:var(--paper);
@@ -106,6 +110,7 @@ main{padding:12px 16px 120px;max-width:640px;margin:0 auto}
     <button id="nextM">›</button>
   </div>
   <div class="total" id="totalLabel"><small>¥</small>0</div>
+  <div class="subtotal" id="subLabel"></div>
   <div class="stackbar" id="stackbar"></div>
   <div class="chips" id="cardChips"></div>
 </header>
@@ -134,6 +139,16 @@ main{padding:12px 16px 120px;max-width:640px;margin:0 auto}
     <div class="field"><label>利用日</label><input id="fDate" type="date"></div>
     <div class="field"><label>金額（円）</label><input id="fAmt" type="number" inputmode="numeric" pattern="[0-9]*"></div>
   </div>
+  <div class="field"><label>自己負担額（割り勘・立て替えのとき変更）</label>
+    <div class="own-quick">
+      <button data-frac="1">全額</button><button data-frac="0.5">半分</button>
+      <button data-frac="0.3333">1/3</button><button data-frac="0">0円（全額立替）</button>
+    </div>
+    <input id="fOwn" type="number" inputmode="numeric" pattern="[0-9]*" placeholder="未入力なら全額自己負担">
+  </div>
+  <div class="field" id="settledWrap" style="display:none">
+    <label style="font-size:14px;color:var(--ink)"><input type="checkbox" id="fSettled">立替分（<span id="settledDiff"></span>）を回収済み</label>
+  </div>
   <div class="field"><label>カード</label><select id="fCard"></select></div>
   <div class="field"><label>メモ</label><input id="fMemo" placeholder="任意"></div>
   <button class="btn pri" id="saveBtn">保存</button>
@@ -159,7 +174,8 @@ const CARD_LIST=["楽天カード","JCBカード","ANA JCBカード","ライフ�
 const PALETTE=["#3E7C59","#D9873A","#4A6FA5","#B8412F","#7A5CA8","#B0913B","#4E8C8A","#8A5A44","#5B6B7A","#A34E6E"];
 let state=load();
 function load(){
-  try{const s=JSON.parse(localStorage.getItem(LS_KEY));if(s&&s.tx)return s;}catch(e){}
+  try{const s=JSON.parse(localStorage.getItem(LS_KEY));
+    if(s&&s.tx){s.tx.forEach(t=>{if(t.own==null)t.own=t.amount;});return s;}}catch(e){}
   return {
     tx:[], // {id,date:"YYYY-MM-DD",store,amount,card,cat,memo}
     cats:["食費","おやつ","学費","交通費","部費","立て替え","趣味","その他"],
@@ -200,12 +216,20 @@ function render(){
   const[y,m]=viewMonth.split("-");
   document.getElementById("monthLabel").textContent=y+"年"+Number(m)+"月";
   const txs=monthTx();
-  const total=txs.reduce((s,t)=>s+t.amount,0);
+  const own=t=>t.own==null?t.amount:t.own;
+  const total=txs.reduce((s,t)=>s+own(t),0);
+  const paid=txs.reduce((s,t)=>s+t.amount,0);
+  const pending=state.tx.filter(t=>own(t)<t.amount&&!t.settled)
+    .reduce((s,t)=>s+(t.amount-own(t)),0); // 全期間の未回収
   document.getElementById("totalLabel").innerHTML="<small>¥</small>"+fmt(total);
+  const parts=[];
+  if(paid!==total)parts.push("カード請求 ¥"+fmt(paid));
+  if(pending>0)parts.push("未回収の立替 ¥"+fmt(pending));
+  document.getElementById("subLabel").textContent=parts.join("　／　");
 
-  // カテゴリ集計
+  // カテゴリ集計（自己負担ベース）
   const byCat={};
-  txs.forEach(t=>{const c=t.cat||UNCAT;(byCat[c]=byCat[c]||{amt:0,cnt:0});byCat[c].amt+=t.amount;byCat[c].cnt++;});
+  txs.forEach(t=>{const c=t.cat||UNCAT;(byCat[c]=byCat[c]||{amt:0,cnt:0});byCat[c].amt+=own(t);byCat[c].cnt++;});
   const order=Object.keys(byCat).sort((a,b)=>byCat[b].amt-byCat[a].amt);
 
   // 帯グラフ
@@ -249,14 +273,17 @@ function render(){
     list.appendChild(h);
     byDate[d].forEach(t=>{
       const cat=t.cat||UNCAT;
+      const ow=t.own==null?t.amount:t.own;
+      const split=ow<t.amount;
+      const splitInfo=split?`<span style="color:${t.settled?"var(--sub)":"var(--shu)"}">立替¥${fmt(t.amount-ow)}${t.settled?"回収済":"未回収"}</span>`:"";
       const b=document.createElement("button");
       b.className="tx"+(cat===UNCAT?" uncat":"");
       b.innerHTML=`<span class="tx-tab" style="background:${catColor(cat)}"></span>
         <span class="tx-body">
           <div class="tx-store">${esc(t.store)}</div>
-          <div class="tx-meta"><span class="tx-cat" style="background:${catColor(cat)}">${esc(cat)}</span><span>${esc(t.card)}</span>${t.memo?`<span>📝${esc(t.memo)}</span>`:""}</div>
+          <div class="tx-meta"><span class="tx-cat" style="background:${catColor(cat)}">${esc(cat)}</span><span>${esc(t.card)}</span>${splitInfo}${t.memo?`<span>📝${esc(t.memo)}</span>`:""}</div>
         </span>
-        <span class="tx-amt">¥${fmt(t.amount)}</span>`;
+        <span class="tx-amt">¥${fmt(ow)}${split?`<span style="font-size:10px;color:var(--sub);font-weight:400">／${fmt(t.amount)}</span>`:""}</span>`;
       b.onclick=()=>openEdit(t.id);
       list.appendChild(b);
     });
@@ -308,18 +335,44 @@ function openEdit(id){
   document.getElementById("fAmt").value=t?t.amount:"";
   document.getElementById("fCard").value=t?t.card:"メルカード";
   document.getElementById("fMemo").value=t?(t.memo||""):"";
+  const ow=t?(t.own==null?t.amount:t.own):null;
+  document.getElementById("fOwn").value=(t&&ow!==t.amount)?ow:"";
+  document.getElementById("fSettled").checked=!!(t&&t.settled);
   pickedCat=t?(t.cat||UNCAT):UNCAT;
-  renderCatGrid();
+  renderCatGrid();updateSettledUI();
   openSheet(editSheet);
 }
+function updateSettledUI(){
+  const amt=Math.round(Number(document.getElementById("fAmt").value))||0;
+  const ownRaw=document.getElementById("fOwn").value;
+  const ow=ownRaw===""?amt:Math.round(Number(ownRaw));
+  const diff=amt-ow;
+  document.getElementById("settledWrap").style.display=diff>0?"block":"none";
+  document.getElementById("settledDiff").textContent="¥"+fmt(Math.max(diff,0));
+}
+document.getElementById("fOwn").addEventListener("input",updateSettledUI);
+document.getElementById("fAmt").addEventListener("input",updateSettledUI);
+document.querySelectorAll(".own-quick button").forEach(b=>{
+  b.onclick=()=>{
+    const amt=Math.round(Number(document.getElementById("fAmt").value))||0;
+    const frac=Number(b.dataset.frac);
+    document.getElementById("fOwn").value=frac===1?"":Math.round(amt*frac);
+    updateSettledUI();
+  };
+});
 document.getElementById("addBtn").onclick=()=>openEdit(null);
 document.getElementById("saveBtn").onclick=()=>{
   const store=document.getElementById("fStore").value.trim();
   const date=document.getElementById("fDate").value;
   const amount=Math.round(Number(document.getElementById("fAmt").value));
   if(!store||!date||!amount){alert("利用先・利用日・金額を入力してください");return;}
+  const ownRaw=document.getElementById("fOwn").value;
+  let ownAmt=ownRaw===""?amount:Math.round(Number(ownRaw));
+  if(!isFinite(ownAmt)||ownAmt<0)ownAmt=amount;
+  if(ownAmt>amount){alert("自己負担額は支払額以下にしてください");return;}
   const rec={
-    store,date,amount,
+    store,date,amount,own:ownAmt,
+    settled:ownAmt<amount?document.getElementById("fSettled").checked:false,
     card:document.getElementById("fCard").value,
     cat:pickedCat===UNCAT?null:pickedCat,
     memo:document.getElementById("fMemo").value.trim()
@@ -475,7 +528,7 @@ function mergeRecords(recs){
     const s=sig(r);incoming[s]=(incoming[s]||0)+1;
     if(incoming[s]<=(existing[s]||0)){skipped++;return;}
     const cat=r.cat&&state.cats.includes(r.cat)?r.cat:(state.learn[r.store]||null);
-    state.tx.push({id:state.seq++,...r,cat,memo:""});
+    state.tx.push({id:state.seq++,...r,own:r.amount,settled:false,cat,memo:""});
     added++;
   });
   if(added&&recs[0])viewMonth=recs[recs.length-1].date.slice(0,7);

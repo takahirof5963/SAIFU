@@ -5,7 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#0F141A">
+<meta name="theme-color" content="#131A22">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <title>サイフノート</title>
 <style>
 :root{
@@ -113,6 +116,12 @@ main{padding:14px 16px 120px;max-width:640px;margin:0 auto}
 .note{font-size:12px;color:var(--sub);line-height:1.7;margin:8px 0}
 .note button,.note label{color:var(--ink);text-decoration:underline}
 .import-result{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;font-size:13px;margin-bottom:10px}
+.imp-hist{margin:14px 0 4px}
+.imp-hist h3{font-size:12px;color:var(--sub);letter-spacing:.1em;margin-bottom:8px;font-weight:600}
+.imp-row{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-bottom:7px;font-size:13px}
+.imp-row .imp-info{flex:1;min-width:0}
+.imp-row .imp-info small{color:var(--sub);font-size:11px}
+.imp-undo{flex:0 0 auto;font-size:12px;padding:6px 12px;border-radius:8px;border:1px solid var(--shu-dim);color:var(--shu);background:transparent}
 .newcat-row{display:flex;gap:8px;margin-top:8px}
 .newcat-row input{flex:1}
 .newcat-row button{flex:0 0 auto;padding:0 16px;background:var(--card2);border:1px solid var(--line);border-radius:10px;font-size:13px}
@@ -215,25 +224,37 @@ main{padding:14px 16px 120px;max-width:640px;margin:0 auto}
 <div class="sheet" id="importSheet">
   <h2>CSV取込</h2>
   <div class="note">対応形式：楽天カード（e-NAVI）／ JCB・ANA JCB（MyJCB）／ ライフカード（LIFE-Web Desk）／ 汎用CSV（利用日,利用先,金額）。文字コードはShift-JIS・UTF-8とも自動判定します。</div>
+  <div class="field"><label>取り込むカード</label>
+    <select id="importCard"></select>
+    <div class="newcat-row"><input id="newCardName" placeholder="新しいカード名を追加"><button id="newCardAdd">追加</button></div>
+  </div>
   <div id="importResult"></div>
   <button class="btn pri" id="pickFileBtn">ファイルを選ぶ</button>
   <button class="btn ghost" id="importClose">閉じる</button>
-  <div class="note">バックアップ：<button id="expJson">JSON書き出し</button>／<label>JSON読み込み<input type="file" id="jsonInput" accept=".json" style="display:none"></label></div>
+  <div id="importHistory"></div>
+  <div class="note">書き出し：<button id="expCsv">CSV（表計算用）</button>／<button id="expJson">JSON（バックアップ）</button>／<label>JSON読み込み<input type="file" id="jsonInput" accept=".json" style="display:none"></label></div>
 </div>
 
 <script>
 "use strict";
 /* ============ データ ============ */
 const LS_KEY="saifunote_v1";
-const CARD_LIST=["楽天カード","JCBカード","ANA JCBカード","ライフカード","メルカード","その他"];
+const DEFAULT_CARDS=["楽天カード","JCBカード","ANA JCBカード","ライフカード","メルカード","その他"];
 const PALETTE=["#66B58C","#E8A65B","#7FA3DB","#E8705A","#AC90DB","#D6BC62","#6FC0BC","#C68F72","#8E9EB3","#D585A5"];
 let state=load();
 function load(){
   try{const s=JSON.parse(localStorage.getItem(LS_KEY));
-    if(s&&s.tx){s.tx.forEach(t=>{if(t.own==null)t.own=t.amount;});return s;}}catch(e){}
+    if(s&&s.tx){
+      s.tx.forEach(t=>{if(t.own==null)t.own=t.amount;});
+      if(!s.cardList)s.cardList=[...new Set([...DEFAULT_CARDS,...s.tx.map(t=>t.card)])];
+      if(!s.imports)s.imports=[];
+      return s;
+    }}catch(e){}
   return {
-    tx:[], // {id,date,store,amount,own,settled,card,cat,memo}
+    tx:[], // {id,date,store,amount,own,settled,card,cat,memo,batch}
     cats:["食費","おやつ","学費","交通費","部費","立て替え","趣味","その他"],
+    cardList:[...DEFAULT_CARDS],
+    imports:[], // {id,ts,count,card,files}
     learn:{},
     seq:1
   };
@@ -487,7 +508,7 @@ document.getElementById("newCatAdd").onclick=()=>{
 };
 function fillCardSelect(){
   const s=document.getElementById("fCard");s.innerHTML="";
-  CARD_LIST.forEach(c=>{const o=document.createElement("option");o.value=o.textContent=c;s.appendChild(o);});
+  state.cardList.forEach(c=>{const o=document.createElement("option");o.value=o.textContent=c;s.appendChild(o);});
 }
 
 /* --- 自己負担スライダー同期 --- */
@@ -574,24 +595,78 @@ document.getElementById("deleteBtn").onclick=()=>{
 };
 
 /* ============ CSV取込 ============ */
-document.getElementById("importBtn").onclick=()=>{$("importResult").innerHTML="";openSheet(importSheet);};
+function fillImportCardSelect(){
+  const s=$("importCard");const cur=s.value;s.innerHTML="";
+  const auto=document.createElement("option");
+  auto.value="__auto";auto.textContent="自動判定（CSVから）";s.appendChild(auto);
+  state.cardList.forEach(c=>{const o=document.createElement("option");o.value=o.textContent=c;s.appendChild(o);});
+  if(cur&&[...s.options].some(o=>o.value===cur))s.value=cur;
+}
+document.getElementById("newCardAdd").onclick=()=>{
+  const v=$("newCardName").value.trim();
+  if(!v)return;
+  if(!state.cardList.includes(v))state.cardList.push(v);
+  save();$("newCardName").value="";
+  fillImportCardSelect();$("importCard").value=v;
+};
+function renderImportHistory(){
+  const h=$("importHistory");
+  const imp=(state.imports||[]).slice().sort((a,b)=>b.ts-a.ts);
+  if(!imp.length){h.innerHTML="";return;}
+  let html='<div class="imp-hist"><h3>取込履歴（間違えたら取り消し）</h3>';
+  imp.slice(0,12).forEach(b=>{
+    const d=new Date(b.ts);
+    const when=(d.getMonth()+1)+"/"+d.getDate()+" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");
+    const alive=state.tx.filter(t=>t.batch===b.id).length;
+    html+=`<div class="imp-row"><div class="imp-info">${esc(b.card)}・${alive}件<br><small>${when}${b.files?"　"+esc(b.files):""}</small></div>
+      <button class="imp-undo" data-b="${b.id}">取り消し</button></div>`;
+  });
+  html+="</div>";
+  h.innerHTML=html;
+  h.querySelectorAll(".imp-undo").forEach(btn=>{
+    btn.onclick=()=>deleteBatch(btn.dataset.b);
+  });
+}
+function deleteBatch(batchId){
+  const b=(state.imports||[]).find(x=>x.id===batchId);
+  const n=state.tx.filter(t=>t.batch===batchId).length;
+  if(!confirm(`この取込（${b?b.card:""} ${n}件）をまとめて削除しますか？`))return;
+  state.tx=state.tx.filter(t=>t.batch!==batchId);
+  state.imports=(state.imports||[]).filter(x=>x.id!==batchId);
+  save();render();renderImportHistory();
+}
+document.getElementById("importBtn").onclick=()=>{
+  $("importResult").innerHTML="";
+  fillImportCardSelect();renderImportHistory();
+  openSheet(importSheet);
+};
 document.getElementById("pickFileBtn").onclick=()=>$("fileInput").click();
 document.getElementById("fileInput").onchange=async e=>{
-  let added=0,skipped=0,errs=[];
+  const cardSel=$("importCard").value;
+  const override=cardSel==="__auto"?null:cardSel;
+  const batchId="b"+Date.now();
+  let added=0,skipped=0,errs=[],fileNames=[];
   for(const f of e.target.files){
     try{
       const text=await readAsText(f);
       const recs=parseAny(text);
       if(!recs.length){errs.push(f.name+"：明細行を認識できませんでした");continue;}
-      const r=mergeRecords(recs);
-      added+=r.added;skipped+=r.skipped;
+      if(override)recs.forEach(r=>r.card=override);
+      const r=mergeRecords(recs,batchId);
+      added+=r.added;skipped+=r.skipped;fileNames.push(f.name);
     }catch(err){errs.push(f.name+"："+err.message);}
   }
   e.target.value="";
-  save();render();
+  if(added>0){
+    const cardsIn=[...new Set(state.tx.filter(t=>t.batch===batchId).map(t=>t.card))];
+    state.imports.push({id:batchId,ts:Date.now(),count:added,
+      card:override||cardsIn.join("・"),files:fileNames.join("・")});
+  }
+  save();render();renderImportHistory();
   const uncat=state.tx.filter(t=>!t.cat&&t.date.slice(0,7)===viewMonth).length;
   $("importResult").innerHTML=
     `<div class="import-result">追加 ${added}件／重複スキップ ${skipped}件${errs.length?"<br>⚠️ "+errs.map(esc).join("<br>"):""}
+    ${added?"<br>間違えた場合は下の取込履歴から取り消せます。":""}
     ${uncat?`<br>未分類が${uncat}件あります。赤枠の明細をタップして分類してください。`:""}</div>`;
 };
 function readAsText(file){
@@ -700,7 +775,7 @@ function parseGeneric(rows){
   return out;
 }
 function sig(t){return[t.date,t.store,t.amount,t.card].join("|");}
-function mergeRecords(recs){
+function mergeRecords(recs,batchId){
   const existing={};
   state.tx.forEach(t=>{existing[sig(t)]=(existing[sig(t)]||0)+1;});
   const incoming={};let added=0,skipped=0;
@@ -708,14 +783,31 @@ function mergeRecords(recs){
     const s=sig(r);incoming[s]=(incoming[s]||0)+1;
     if(incoming[s]<=(existing[s]||0)){skipped++;return;}
     const cat=r.cat&&state.cats.includes(r.cat)?r.cat:(state.learn[r.store]||null);
-    state.tx.push({id:state.seq++,...r,own:r.amount,settled:false,cat,memo:""});
+    // 取り込んだカードが未登録なら自動追加
+    if(r.card&&!state.cardList.includes(r.card))state.cardList.push(r.card);
+    state.tx.push({id:state.seq++,...r,own:r.amount,settled:false,cat,memo:"",batch:batchId||null});
     added++;
   });
   if(added&&recs[0])viewMonth=recs[recs.length-1].date.slice(0,7);
   return{added,skipped};
 }
 
-/* ============ バックアップ ============ */
+/* ============ 書き出し ============ */
+document.getElementById("expCsv").onclick=()=>{
+  const q=s=>{s=String(s??"");return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;};
+  const head=["利用日","利用先","支払額","自己負担額","立替額","カテゴリ","カード","立替回収済み","メモ"];
+  const rows=state.tx.slice().sort((a,b)=>a.date.localeCompare(b.date)||a.id-b.id).map(t=>{
+    const ow=ownOf(t);
+    return [t.date,t.store,t.amount,ow,Math.max(t.amount-ow,0),
+      t.cat||"未分類",t.card,(ow<t.amount?(t.settled?"済":"未"):""),t.memo||""].map(q).join(",");
+  });
+  const csv="\uFEFF"+head.join(",")+"\n"+rows.join("\n"); // BOM付きUTF-8（Excel文字化け防止）
+  const blob=new Blob([csv],{type:"text/csv;charset=utf-8"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="saifunote_"+new Date().toISOString().slice(0,10)+".csv";
+  a.click();
+};
 document.getElementById("expJson").onclick=()=>{
   const blob=new Blob([JSON.stringify(state)],{type:"application/json"});
   const a=document.createElement("a");
@@ -729,12 +821,19 @@ document.getElementById("jsonInput").onchange=async e=>{
     const s=JSON.parse(await f.text());
     if(!s.tx)throw new Error("形式が違います");
     s.tx.forEach(t=>{if(t.own==null)t.own=t.amount;});
+    if(!s.cardList)s.cardList=[...new Set([...DEFAULT_CARDS,...s.tx.map(t=>t.card)])];
+    if(!s.imports)s.imports=[];
     state=s;save();render();closeSheets();
   }catch(err){alert("読み込み失敗："+err.message);}
   e.target.value="";
 };
 
 render();
+
+/* ============ Service Worker 登録 ============ */
+if("serviceWorker" in navigator){
+  window.addEventListener("load",()=>{navigator.serviceWorker.register("sw.js").catch(()=>{});});
+}
 </script>
 </body>
 </html>
